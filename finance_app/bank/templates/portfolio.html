@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container my-5">
+  <h1 class="text-center">Your Investment Portfolio</h1>
+  <p class="text-center">Cash Balance: £{{ portfolio.cash_balance|floatformat:2 }}</p>
+  
+  <!-- Holdings Table with Cash Row -->
+  <h2>Your Holdings</h2>
+  <table class="table table-striped">
+    <thead>
+      <tr>
+        <th>Asset</th>
+        <th>Value</th>
+        <th>Percentage (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- Cash row -->
+      <tr>
+        <td>Cash</td>
+        <td>£{{ portfolio.cash_balance|floatformat:2 }}</td>
+        <td>{{ cash_percentage|floatformat:2 }}%</td>
+      </tr>
+      <!-- Stock holdings -->
+      {% for item in holding_data %}
+      <tr>
+        <td>{{ item.holding.stock.ticker }}</td>
+        <td>£{{ item.value|floatformat:2 }}</td>
+        <td>{{ item.percentage|floatformat:2 }}%</td>
+      </tr>
+      {% empty %}
+      <tr>
+        <td colspan="3">No holdings found.</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  
+  <!-- Charts Section: Two Charts Side-by-Side -->
+  <div class="row mt-5">
+    <!-- Pie Chart: Portfolio Distribution -->
+    <div class="col-md-6 text-center">
+      <h2 class="mb-3">Portfolio Distribution</h2>
+      <div style="display: flex; justify-content: center;">
+        <canvas id="portfolioPieChart" style="width:300px; height:300px;"></canvas>
+      </div>
+    </div>
+    <!-- Line Chart: Portfolio Value History -->
+    <div class="col-md-6 text-center">
+      <h2 class="mb-3">Portfolio Value History</h2>
+      <div style="display: flex; justify-content: center;">
+        <canvas id="portfolioLineChart" style="width:300px; height:300px;"></canvas>
+      </div>
+      <div id="portfolioChange" class="mt-2"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  // ----- PIE CHART: Portfolio Distribution -----
+  var pieData = JSON.parse('{{ chart_data|escapejs }}');
+  var pieCtx = document.getElementById('portfolioPieChart').getContext('2d');
+  var pieLabels = pieData.map(item => item.label);
+  var pieValues = pieData.map(item => item.value);
+  var pieColors = [
+    'rgba(255, 99, 132, 0.7)',
+    'rgba(54, 162, 235, 0.7)',
+    'rgba(255, 206, 86, 0.7)',
+    'rgba(75, 192, 192, 0.7)',
+    'rgba(153, 102, 255, 0.7)',
+    'rgba(255, 159, 64, 0.7)',
+    'rgba(199, 199, 199, 0.7)',
+    'rgba(83, 102, 255, 0.7)',
+    'rgba(255, 99, 71, 0.7)',
+    'rgba(60, 179, 113, 0.7)'
+  ];
+  var portfolioPieChart = new Chart(pieCtx, {
+      type: 'pie',
+      data: {
+          labels: pieLabels,
+          datasets: [{
+              data: pieValues,
+              backgroundColor: pieColors.slice(0, pieLabels.length),
+              borderColor: 'rgba(255, 255, 255, 1)',
+              borderWidth: 1
+          }]
+      },
+      options: {
+          responsive: false,
+          maintainAspectRatio: false,
+          plugins: {
+              legend: {
+                  position: 'bottom'
+              }
+          }
+      }
+  });
+
+  // ----- LINE CHART: Portfolio Value History -----
+  var lineCtx = document.getElementById('portfolioLineChart').getContext('2d');
+  var portfolioLineChart;
+  function fetchPortfolioHistory() {
+    fetch("{% url 'portfolio_history' %}")
+      .then(response => response.json())
+      .then(data => {
+          var labels = data.history.map(item => item.timestamp);
+          var values = data.history.map(item => item.total_value);
+          var startingValue = data.starting_value;
+          var currentValue = data.current_value;
+          var percentageChange = startingValue > 0 ? ((currentValue - startingValue) / startingValue) * 100 : 0;
+          document.getElementById('portfolioChange').innerText = "Change since start of day: " + percentageChange.toFixed(2) + "%";
+          if (portfolioLineChart) {
+              portfolioLineChart.data.labels = labels;
+              portfolioLineChart.data.datasets[0].data = values;
+              portfolioLineChart.update();
+          } else {
+              portfolioLineChart = new Chart(lineCtx, {
+                  type: 'line',
+                  data: {
+                      labels: labels,
+                      datasets: [{
+                          label: 'Portfolio Value (£)',
+                          data: values,
+                          backgroundColor: 'rgba(75, 192, 192, 0.4)',
+                          borderColor: 'rgba(75, 192, 192, 1)',
+                          fill: true,
+                          tension: 0.1
+                      }]
+                  },
+                  options: {
+                      responsive: false,
+                      maintainAspectRatio: false,
+                      scales: {
+                          y: {
+                              beginAtZero: false
+                          }
+                      }
+                  }
+              });
+          }
+      })
+      .catch(error => console.error("Error fetching portfolio history:", error));
+  }
+  fetchPortfolioHistory();
+  setInterval(fetchPortfolioHistory, 60000);
+</script>
+{% endblock %}
