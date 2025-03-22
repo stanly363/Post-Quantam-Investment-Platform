@@ -100,15 +100,41 @@
   </div>
   
   <!-- Key Management Section -->
-  <div class="text-center mb-5">
-    
-      <h2 class="mb-3">Key Management</h2>
-      <p>Algorithm: <strong>{{ server_algorithm }}</strong></p>
-      <p>Server Public Key:</p>
-      <p>{{ server_public_key }}</p>
-      <a href="{% url 'rotate_keys' %}" class="btn btn-warning btn-lg mt-3">Rotate Keys</a>
-    
+<div class="text-center mb-5">
+  <h2 class="mb-3">Key Management</h2>
+  <p>Algorithm: <strong>{{ server_algorithm }}</strong></p>
+
+  <!-- Key Preview Section -->
+  <p>Server Public Key (Preview):</p>
+  <p id="key-preview">{{ server_public_key|slice:":30" }}... <a href="#" onclick="toggleFullKey(event)">View Full Key</a></p>
+
+  <!-- Full Key Display Section (Hidden Initially) -->
+  <div id="full-key-container" style="display:none;">
+      <textarea id="full-key" rows="5" class="form-control" readonly>
+{{ server_public_key }}
+      </textarea>
+      <a href="#" onclick="toggleFullKey(event)">Hide Full Key</a>
   </div>
+
+  <a href="{% url 'rotate_keys' %}" class="btn btn-warning btn-lg mt-3">Rotate Keys</a>
+</div>
+
+<script>
+  function toggleFullKey(event) {
+      event.preventDefault();
+      const fullKeyContainer = document.getElementById('full-key-container');
+      const keyPreview = document.getElementById('key-preview');
+
+      if (fullKeyContainer.style.display === 'none') {
+          fullKeyContainer.style.display = 'block';
+          keyPreview.style.display = 'none';
+      } else {
+          fullKeyContainer.style.display = 'none';
+          keyPreview.style.display = 'block';
+      }
+  }
+</script>
+
   
   <!-- Recent Transactions Section -->
   <div class="mt-4">

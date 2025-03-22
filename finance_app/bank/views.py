@@ -476,8 +476,56 @@ def admin_user_detail_view(request, user_id):
     if request.user.profile.role != 'admin':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
+    
     user_obj = get_object_or_404(User, id=user_id)
-    return render(request, 'admin_user_detail.html', {'user_obj': user_obj})
+    # Get (or create) the portfolio for the user
+    portfolio, created = Portfolio.objects.get_or_create(user=user_obj)
+    holdings = portfolio.holdings.all()
+    cash = float(portfolio.cash_balance)
+    
+    total_holdings_value = 0
+    holding_data = []
+    for holding in holdings:
+        if holding.stock.last_price:
+            value = float(holding.shares) * float(holding.stock.last_price)
+        else:
+            value = 0
+        total_holdings_value += value
+        holding_data.append({
+            'holding': holding,
+            'value': value,
+            'percentage': 0,  # to be updated
+        })
+    
+    total_portfolio_value = cash + total_holdings_value
+    cash_percentage = (cash / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+    
+    for item in holding_data:
+        item['percentage'] = (item['value'] / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+    
+    # Build chart data for the pie chart.
+    chart_data = []
+    chart_data.append({
+        "label": "Cash",
+        "value": cash,
+        "percentage": cash_percentage
+    })
+    for item in holding_data:
+        chart_data.append({
+            "label": item['holding'].stock.ticker,
+            "value": item['value'],
+            "percentage": item['percentage']
+        })
+    
+    context = {
+        'user_obj': user_obj,
+        'portfolio': portfolio,
+        'holding_data': holding_data,
+        'chart_data': json.dumps(chart_data),
+        'total_portfolio_value': total_portfolio_value,
+        'cash_percentage': cash_percentage,
+    }
+    return render(request, 'admin_user_detail.html', context)
 
 @login_required
 def admin_user_delete_view(request, user_id):
