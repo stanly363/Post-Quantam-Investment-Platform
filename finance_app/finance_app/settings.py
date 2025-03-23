@@ -3,6 +3,11 @@ from pathlib import Path
 import environ
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+SECURE_HSTS_SECONDS = 31536000 
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True 
+SECURE_HSTS_PRELOAD = True  
+SECURE_SSL_REDIRECT = True
 
 # Initialize environment variables
 env = environ.Env(
@@ -28,6 +33,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'widget_tweaks',
+    'sslserver',
     'bank',  # our custom app
 ]
 
