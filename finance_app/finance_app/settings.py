@@ -8,7 +8,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
+SECRET_KEY = 'django-insecure-0luba!c*&my49ubqhz8mx+u6mw&i)ky7w0pco^0#aerzt8x_k%'
 
 DEBUG = True
 
@@ -66,6 +66,15 @@ DATABASES = {
         'PORT': '13317',
         'OPTIONS': {'sslmode': 'require'},
     }
+}
+
+from django.contrib.messages import constants as messages
+MESSAGE_TAGS = {
+    messages.DEBUG: 'secondary',
+    messages.INFO: 'info',
+    messages.SUCCESS: 'success',
+    messages.WARNING: 'warning',
+    messages.ERROR: 'danger',
 }
 
 AUTH_PASSWORD_VALIDATORS = [

@@ -204,6 +204,8 @@ def login_view(request):
             messages.success(request, f"Welcome {username}!")
             if user.profile.role == 'admin':
                 return redirect('admin_dashboard')
+            elif user.profile.role == 'advisor':
+                return redirect('advisor')
             else:
                 return redirect('portfolio')
         else:
@@ -320,8 +322,9 @@ def portfolio_view(request):
             "value": item['value'],
             "percentage": item['percentage']
         })
-    
+    stocks = Stock.objects.all().order_by('ticker')
     context = {
+        'stocks': stocks,
         'portfolio': portfolio,
         'holdings': holdings,
         'holding_data': holding_data,
@@ -591,12 +594,434 @@ def clear_db_view(request):
 
 @login_required
 def advisor_view(request):
+    # Only allow advisors.
     if request.user.profile.role != 'advisor':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
-    clients = Profile.objects.filter(role='client')
-    AuditLog.objects.create(
-        event=f"Advisor {request.user.username} viewed client list.",
-        user=request.user
-    )
-    return render(request, 'advisor.html', {'clients': clients})
+    
+    # Get all client profiles with role 'client'
+    client_profiles = Profile.objects.filter(role='client').order_by('user__username')
+    
+    # Prepare a list for per-client data
+    clients_data = []
+    # Initialize aggregated values.
+    total_cash = 0.0
+    # Dictionary to aggregate stock holdings by ticker.
+    # Format: { ticker: {'shares': total_shares, 'price': last_price, 'company_name': company_name} }
+    stock_totals = {}
+    
+    # Loop through each client portfolio.
+    for client in client_profiles:
+        portfolio, _ = Portfolio.objects.get_or_create(user=client.user)
+        cash = float(portfolio.cash_balance)
+        total_holdings_value = 0.0
+        
+        # Compute total holdings value for this client's portfolio.
+        for holding in portfolio.holdings.all():
+            price = float(holding.stock.last_price) if holding.stock.last_price else 0.0
+            total_holdings_value += float(holding.shares) * price
+        
+        portfolio_value = cash + total_holdings_value
+        total_cash += cash
+        
+        # Aggregate holdings for chart_data.
+        for holding in portfolio.holdings.all():
+            ticker = holding.stock.ticker
+            price = float(holding.stock.last_price) if holding.stock.last_price else 0.0
+            if ticker in stock_totals:
+                stock_totals[ticker]['shares'] += float(holding.shares)
+            else:
+                stock_totals[ticker] = {
+                    'shares': float(holding.shares),
+                    'price': price,
+                    'company_name': holding.stock.company_name
+                }
+        
+        # Append individual client data.
+        clients_data.append({
+            'user': client.user,
+            'portfolio_value': portfolio_value,
+        })
+    
+    # Build chart_data for the pie chart.
+    # First add the aggregated cash value.
+    chart_data = [{
+        'label': "Cash",
+        'value': total_cash
+    }]
+    
+    # Then add each stock's total value, computed as total shares held * current price.
+    for ticker, data in stock_totals.items():
+        total_value = data['shares'] * data['price']
+        chart_data.append({
+            'label': ticker,
+            'value': total_value,
+            'shares': data['shares'],
+            'company_name': data['company_name']
+        })
+    
+    # Compute the total combined value (cash plus all stocks).
+    total_combined_value = total_cash + sum(item['value'] for item in chart_data if item['label'] != "Cash")
+    
+    # Add a percentage field to each item.
+    for item in chart_data:
+        item['percentage'] = (item['value'] / total_combined_value * 100) if total_combined_value > 0 else 0
+
+    context = {
+        'clients': clients_data,  # Now each client dict contains a 'portfolio_value' field.
+        'stocks': Stock.objects.all().order_by('ticker'),
+        'chart_data': json.dumps(chart_data),
+    }
+    return render(request, 'advisor.html', context)
+
+
+@login_required
+def advisor_transaction_view(request):
+    if request.user.profile.role != 'advisor':
+        messages.error(request, "Access denied.")
+        return redirect('portfolio')
+    
+    if request.method == 'POST':
+        client_id = request.POST.get("client")
+        ticker = request.POST.get("ticker").strip().upper()
+        shares_input = request.POST.get("shares")
+        action = request.POST.get("action")  # "buy" or "sell"
+        
+        try:
+            shares = Decimal(shares_input)
+        except Exception:
+            messages.error(request, "Invalid share amount.")
+            return redirect('advisor_transaction')
+        
+        # Retrieve the client by id.
+        try:
+            client_user = User.objects.get(id=client_id)
+        except User.DoesNotExist:
+            messages.error(request, "Client not found.")
+            return redirect('advisor_transaction')
+        
+        # Get (or create) the client's portfolio.
+        portfolio, _ = Portfolio.objects.get_or_create(user=client_user)
+        
+        # Retrieve the stock instance.
+        try:
+            stock = Stock.objects.get(ticker=ticker)
+        except Stock.DoesNotExist:
+            messages.error(request, "Stock not found.")
+            return redirect('advisor_transaction')
+        
+        # Retrieve current stock price using yfinance.
+        try:
+            yf_ticker = yf.Ticker(stock.ticker)
+            history = yf_ticker.history(period="1d")
+            if not history.empty:
+                price = Decimal(str(history['Close'].iloc[-1]))
+            else:
+                messages.error(request, "Stock price not available.")
+                return redirect('advisor_transaction')
+        except Exception:
+            messages.error(request, "Error retrieving stock data.")
+            return redirect('advisor_transaction')
+        
+        if action == 'buy':
+            total_cost = shares * price
+            if portfolio.cash_balance < total_cost:
+                messages.error(request, "Client has insufficient funds for this purchase.")
+                return redirect('advisor_transaction')
+            
+            # Deduct cash from portfolio and update holdings.
+            portfolio.cash_balance -= total_cost
+            portfolio.save()
+            
+            holding, created = Holding.objects.get_or_create(
+                portfolio=portfolio, 
+                stock=stock, 
+                defaults={'shares': Decimal('0')}
+            )
+            holding.shares += shares
+            holding.save()
+            
+            InvestmentTransaction.objects.create(
+                portfolio=portfolio,
+                stock=stock,
+                transaction_type='BUY',
+                shares=shares,
+                price=price
+            )
+            
+            AuditLog.objects.create(
+                event=f"Advisor {request.user.username} bought {shares} shares of {ticker} at £{price:.2f} for client {client_user.username}.",
+                user=request.user
+            )
+            
+            messages.success(
+                request,
+                f"Bought {shares} shares of {ticker} for {client_user.username} at £{price:.2f} per share."
+            )
+        
+        elif action == 'sell':
+            holding = Holding.objects.filter(portfolio=portfolio, stock=stock).first()
+            if not holding:
+                messages.error(request, "Client does not hold this stock.")
+                return redirect('advisor_transaction')
+            
+            if holding.shares < shares:
+                messages.error(request, "Client does not have enough shares to sell.")
+                return redirect('advisor_transaction')
+            
+            # Calculate cash from sale.
+            total_sale = shares * price
+            
+            # Increase cash balance and update holdings.
+            portfolio.cash_balance += total_sale
+            portfolio.save()
+            
+            holding.shares -= shares
+            if holding.shares == 0:
+                holding.delete()
+            else:
+                holding.save()
+            
+            InvestmentTransaction.objects.create(
+                portfolio=portfolio,
+                stock=stock,
+                transaction_type='SELL',
+                shares=shares,
+                price=price
+            )
+            
+            AuditLog.objects.create(
+                event=f"Advisor {request.user.username} sold {shares} shares of {ticker} at £{price:.2f} for client {client_user.username}.",
+                user=request.user
+            )
+            
+            messages.success(
+                request,
+                f"Sold {shares} shares of {ticker} for {client_user.username} at £{price:.2f} per share."
+            )
+        
+        else:
+            messages.error(request, "Invalid transaction action.")
+        
+        return redirect('advisor')
+    
+    else:
+        # GET request: render the transaction form.
+        clients = Profile.objects.filter(role='client').order_by('user__username')
+        stocks = Stock.objects.all().order_by('ticker')
+        context = {
+            'clients': clients,
+            'stocks': stocks,
+        }
+        return render(request, 'advisor_transaction.html', context)
+
+
+@login_required
+def advisor_client_detail_view(request, client_id):
+    # Only advisors can view client details.
+    if request.user.profile.role != 'advisor':
+        messages.error(request, "Access denied.")
+        return redirect('portfolio')
+    
+    # Retrieve the client profile and ensure the role is 'client'
+    client_profile = get_object_or_404(Profile, id=client_id, role='client')
+    
+    # Get (or create) the client's portfolio
+    portfolio, _ = Portfolio.objects.get_or_create(user=client_profile.user)
+    holdings = portfolio.holdings.all()
+    # Cash value
+    cash = float(portfolio.cash_balance)
+    
+    total_holdings_value = 0.0
+    holding_data = []
+    for holding in holdings:
+        if holding.stock.last_price:
+            value = float(holding.shares) * float(holding.stock.last_price)
+        else:
+            value = 0.0
+        total_holdings_value += value
+        holding_data.append({
+            'holding': holding,
+            'value': value,
+            'percentage': 0,  # will compute next
+        })
+    
+    total_portfolio_value = cash + total_holdings_value
+    # Compute cash percentage
+    cash_percentage = (cash / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+    
+    # Update each holding's percentage
+    for item in holding_data:
+        item['percentage'] = (item['value'] / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+    
+    # Build chart data for pie chart (includes cash and each holding)
+    chart_data = []
+    chart_data.append({
+        "label": "Cash",
+        "value": cash,
+        "percentage": cash_percentage
+    })
+    for item in holding_data:
+        chart_data.append({
+            "label": item['holding'].stock.ticker,
+            "value": item['value'],
+            "percentage": item['percentage']
+        })
+    
+    context = {
+        'client_profile': client_profile,
+        'portfolio': portfolio,
+        'holding_data': holding_data,
+        'chart_data': json.dumps(chart_data),
+        'total_portfolio_value': total_portfolio_value,
+        'cash_percentage': cash_percentage,
+    }
+    return render(request, 'advisor_client_detail.html', context)
+
+@login_required
+def advisor_message_view(request):
+    # Only advisors can send investment recommendations.
+    if request.user.profile.role != 'advisor':
+        messages.error(request, "Access denied.")
+        return redirect('portfolio')
+    
+    if request.method == 'POST':
+        recipient_username = request.POST.get("recipient").strip()
+        message_text = request.POST.get("message").strip()
+        
+        if not recipient_username or not message_text:
+            messages.error(request, "Both recipient and message are required.")
+            return redirect('advisor_message')
+        
+        try:
+            recipient = User.objects.get(username=recipient_username)
+        except User.DoesNotExist:
+            messages.error(request, "Client not found.")
+            return redirect('advisor_message')
+        
+        # Encrypt the message using your crypto_utils function.
+        encrypted_text = crypto_utils.encrypt_message(message_text)
+        Message.objects.create(
+            sender=request.user,
+            recipient=recipient,
+            encrypted_text=encrypted_text
+        )
+        
+        AuditLog.objects.create(
+            event=f"Advisor {request.user.username} sent a recommendation to {recipient.username}.",
+            user=request.user
+        )
+        
+        messages.success(request, "Recommendation sent successfully.")
+        # Redirect to the chat detail view for this recipient.
+        return redirect('chat', username=recipient.username)
+    
+    # For GET requests, render the message form.
+    return render(request, 'advisor_message.html')
+
+@login_required
+def client_transaction_view(request):
+    # Ensure that only clients can access this view.
+    if request.user.profile.role != 'client':
+        messages.error(request, "ERROR: ACCESS DENIED. Only clients can perform transactions.")
+        return redirect('portfolio')
+    
+    portfolio, _ = Portfolio.objects.get_or_create(user=request.user)
+    
+    if request.method == 'POST':
+        ticker = request.POST.get("ticker", "").strip().upper()
+        shares_input = request.POST.get("shares")
+        action = request.POST.get("action")  # Expected "buy" or "sell"
+        
+        try:
+            shares = Decimal(shares_input)
+        except Exception:
+            messages.error(request, "ERROR: INVALID SHARE AMOUNT. Please enter a valid number.")
+            return redirect('portfolio')
+        
+        # Retrieve the stock instance.
+        try:
+            stock = Stock.objects.get(ticker=ticker)
+        except Stock.DoesNotExist:
+            messages.error(request, f"ERROR: STOCK '{ticker}' NOT FOUND.")
+            return redirect('portfolio')
+        
+        # Retrieve the current stock price using yfinance.
+        try:
+            yf_ticker = yf.Ticker(stock.ticker)
+            history = yf_ticker.history(period="1d")
+            if not history.empty:
+                price = Decimal(str(history['Close'].iloc[-1]))
+            else:
+                messages.error(request, "ERROR: STOCK PRICE NOT AVAILABLE. Please try again later.")
+                return redirect('portfolio')
+        except Exception:
+            messages.error(request, "ERROR: UNABLE TO RETRIEVE STOCK DATA. Please try again later.")
+            return redirect('portfolio')
+        
+        if action == 'buy':
+            total_cost = shares * price
+            if portfolio.cash_balance < total_cost:
+                messages.error(request, "ERROR: INSUFFICIENT FUNDS. Please check your cash balance.")
+                return redirect('portfolio')
+            
+            # Deduct cash and update holdings.
+            portfolio.cash_balance -= total_cost
+            portfolio.save()
+            holding, created = Holding.objects.get_or_create(
+                portfolio=portfolio, stock=stock, defaults={'shares': Decimal('0')}
+            )
+            holding.shares += shares
+            holding.save()
+            
+            InvestmentTransaction.objects.create(
+                portfolio=portfolio,
+                stock=stock,
+                transaction_type='BUY',
+                shares=shares,
+                price=price
+            )
+            
+            messages.success(request, f"SUCCESS: Purchased {shares} shares of {ticker} at £{price:.2f} per share.")
+        
+        elif action == 'sell':
+            holding = Holding.objects.filter(portfolio=portfolio, stock=stock).first()
+            if not holding:
+                messages.error(request, "ERROR: YOU DO NOT HOLD THIS STOCK. PLEASE VERIFY YOUR HOLDINGS.")
+                return redirect('portfolio')
+            if holding.shares < shares:
+                messages.error(request, "ERROR: NOT ENOUGH SHARES TO SELL. PLEASE CHECK YOUR HOLDINGS.")
+                return redirect('portfolio')
+            
+            total_sale = shares * price
+            portfolio.cash_balance += total_sale
+            portfolio.save()
+            
+            holding.shares -= shares
+            if holding.shares == 0:
+                holding.delete()
+            else:
+                holding.save()
+            
+            InvestmentTransaction.objects.create(
+                portfolio=portfolio,
+                stock=stock,
+                transaction_type='SELL',
+                shares=shares,
+                price=price
+            )
+            
+            messages.success(request, f"SUCCESS: Sold {shares} shares of {ticker} at £{price:.2f} per share.")
+        
+        else:
+            messages.error(request, "ERROR: INVALID TRANSACTION ACTION. PLEASE CHOOSE 'BUY' OR 'SELL'.")
+        
+        return redirect('portfolio')
+    
+    # For GET requests, render the transaction form.
+    stocks = Stock.objects.all().order_by('ticker')
+    context = {
+        'stocks': stocks,
+        'portfolio': portfolio,
+    }
+    return render(request, 'client_transaction.html', context)

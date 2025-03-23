@@ -36,26 +36,57 @@
     </tbody>
   </table>
   
-  <!-- Charts Section: Two Charts Side-by-Side -->
+  <!-- Combined Charts & Trade Stocks Section in one row -->
   <div class="row mt-5">
-    <!-- Pie Chart: Portfolio Distribution -->
-    <div class="col-md-6 text-center">
-      <h2 class="mb-3">Portfolio Distribution</h2>
-      <div style="display: flex; justify-content: center;">
-        <canvas id="portfolioPieChart" style="width:300px; height:300px;"></canvas>
+    <!-- Column 1: Pie Chart: Portfolio Distribution -->
+    <div class="col-md-4 d-flex align-items-center justify-content-center">
+      <div>
+        <h2 class="mb-3 text-center">Portfolio Distribution</h2>
+        <div style="display: flex; justify-content: center;">
+          <canvas id="portfolioPieChart" style="width:300px; height:300px;"></canvas>
+        </div>
       </div>
     </div>
-    <!-- Line Chart: Portfolio Value History -->
-    <div class="col-md-6 text-center">
-      <h2 class="mb-3">Portfolio Value History</h2>
-      <div style="display: flex; justify-content: center;">
-        <canvas id="portfolioLineChart" style="width:300px; height:300px;"></canvas>
+    <!-- Column 2: Line Chart: Portfolio Value History -->
+    <div class="col-md-4 d-flex align-items-center justify-content-center">
+      <div>
+        <h2 class="mb-3 text-center">Portfolio Value History</h2>
+        <div style="display: flex; justify-content: center;">
+          <canvas id="portfolioLineChart" style="width:300px; height:300px;"></canvas>
+        </div>
+        <div id="portfolioChange" class="mt-2 text-center"></div>
       </div>
-      <div id="portfolioChange" class="mt-2"></div>
+    </div>
+    <!-- Column 3: Trade Stocks Section -->
+    <div class="col-md-4 d-flex align-items-center justify-content-center">
+      <div style="width:300px;">
+        <h2 class="mb-3 text-center">Trade Stocks</h2>
+        <form method="post" action="{% url 'client_transaction' %}">
+          {% csrf_token %}
+          <div class="mb-3">
+            <label for="ticker" class="form-label">Stock Ticker</label>
+            <select name="ticker" id="ticker" class="form-select" required>
+              <option value="">-- Select Stock --</option>
+              {% for stock in stocks %}
+                <option value="{{ stock.ticker }}">{{ stock.ticker }} - {{ stock.company_name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label for="shares" class="form-label">Number of Shares</label>
+            <input type="number" name="shares" id="shares" class="form-control" step="0.01" placeholder="Enter number of shares" required>
+          </div>
+          <div class="d-flex justify-content-between">
+            <button type="submit" name="action" value="buy" class="btn btn-primary">Buy</button>
+            <button type="submit" name="action" value="sell" class="btn btn-danger">Sell</button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 </div>
 
+<!-- Chart.js CDN -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
   // ----- PIE CHART: Portfolio Distribution -----

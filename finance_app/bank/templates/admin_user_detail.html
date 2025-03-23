@@ -46,7 +46,13 @@
     <!-- Back to Dashboard Button -->
 <div class="row mt-4">
   <div class="col-md-12 text-start">
-    <a href="{% url 'admin_dashboard' %}" class="btn btn-secondary">Back to Dashboard</a>
+    {% if user.profile.role == 'admin' %}
+      <a href="{% url 'admin_dashboard' %}" class="btn btn-secondary">Back to Dashboard</a>
+    {% elif user.profile.role == 'advisor' %}
+      <a href="{% url 'advisor' %}" class="btn btn-secondary">Back to Dashboard</a>
+    {% else %}
+      <a href="{% url 'portfolio' %}" class="btn btn-secondary">Back to Dashboard</a>
+    {% endif %}
   </div>
 </div>
 

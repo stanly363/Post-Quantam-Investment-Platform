@@ -1,6 +1,9 @@
+# bank/urls.py
+
 from django.urls import path
 from . import views
 from django.contrib.auth import views as auth_views
+
 urlpatterns = [
     path('', views.portfolio_view, name='portfolio'),
     path('register/', views.register_view, name='register'),
@@ -13,10 +16,13 @@ urlpatterns = [
     path('admin_user_delete/<int:user_id>/', views.admin_user_delete_view, name='admin_user_delete'),
     path('admin_create_user/', views.admin_create_user_view, name='admin_create_user'),
     path('advisor/', views.advisor_view, name='advisor'),
+    path('advisor_client_detail/<int:client_id>/', views.advisor_client_detail_view, name='advisor_client_detail'),
+    path('advisor_message/', views.advisor_message_view, name='advisor_message'),
     path('rotate_keys/', views.rotate_keys_view, name='rotate_keys'),
     path('clear_db/', views.clear_db_view, name='clear_db'),
     path('portfolio_history/', views.portfolio_history_view, name='portfolio_history'),
-    # New chat URLs:
+    path('advisor_transaction/', views.advisor_transaction_view, name='advisor_transaction'),
+    path('client_transaction/', views.client_transaction_view, name='client_transaction'),
     path('create_chat/', views.create_chat_view, name='create_chat'),
     path('chat/', views.chat_redirect_view, name='chat_redirect'),
     path('chat/<str:username>/', views.chat_detail_view, name='chat'),
