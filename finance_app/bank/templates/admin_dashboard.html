@@ -143,23 +143,15 @@
       <table class="table table-bordered table-striped text-center">
         <thead class="table-dark">
           <tr>
-            <th>ID</th>
-            <th>Stock</th>
-            <th>Type</th>
-            <th>Shares</th>
-            <th>Price (£)</th>
-            <th>Timestamp</th>
+            <th>ID</th><th>Stock</th><th>Type</th><th>Shares</th><th>Price (£)</th><th>Timestamp</th>
           </tr>
         </thead>
         <tbody>
           {% for tx in recent_transactions %}
             <tr>
               <td>{{ tx.id }}</td>
-              <td>{{ tx.stock.ticker }}</td>
-              <td>{{ tx.transaction_type }}</td>
-              <td>{{ tx.shares|floatformat:2 }}</td>
-              <td>£{{ tx.price|floatformat:2 }}</td>
-              <td>{{ tx.get_formatted_timestamp }}</td>
+              <td>{{ tx.stock }}</td><td>{{ tx.transaction_type }}</td><td>{{ tx.shares|floatformat:2 }}</td>
+              <td>£{{ tx.price|floatformat:2 }}</td><td>{{ tx.timestamp }}</td>
             </tr>
           {% empty %}
             <tr>
@@ -167,9 +159,7 @@
             </tr>
           {% endfor %}
         </tbody>
-      </table>
-    </div>
-  </div>
+      </table></div></div>
   
 </div>
 {% endblock %}

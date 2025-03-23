@@ -2,7 +2,7 @@
 {% block content %}
 <div class="container my-5">
   <h1 class="text-center">Your Investment Portfolio</h1>
-  <p class="text-center">Cash Balance: £{{ portfolio.cash_balance|floatformat:2 }}</p>
+  <p class="text-center">Cash Balance: £{{ cash_balance|floatformat:2 }}</p>
   
   <!-- Holdings Table with Cash Row -->
   <h2>Your Holdings</h2>
@@ -18,7 +18,7 @@
       <!-- Cash row -->
       <tr>
         <td>Cash</td>
-        <td>£{{ portfolio.cash_balance|floatformat:2 }}</td>
+        <td>£{{ cash_balance|floatformat:2 }}</td>
         <td>{{ cash_percentage|floatformat:2 }}%</td>
       </tr>
       <!-- Stock holdings -->

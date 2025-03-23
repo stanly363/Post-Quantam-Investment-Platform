@@ -20,7 +20,7 @@
         <tbody>
           <tr>
             <td>Cash</td>
-            <td>£{{ portfolio.cash_balance|floatformat:2 }}</td>
+            <td>£{{ cash|floatformat:2 }}</td>
             <td>{{ cash_percentage|floatformat:2 }}%</td>
           </tr>
           {% for item in holding_data %}

@@ -5,7 +5,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from .models import (
     Profile, Portfolio, Stock, Holding,
-    InvestmentTransaction, AuditLog, PQServerKey, Transaction
+    InvestmentTransaction, AuditLog, PQServerKey,
 )
 from django.db import transaction  # Ensures atomic transactions
 
@@ -21,7 +21,7 @@ from .models import PortfolioHistory
 from django.db.models import Q
 from .models import Message
 from .forms import UserUpdateForm
-
+from .crypto_utils import encrypt_field,decrypt_field
 @login_required
 def profile_update_view(request):
     if request.method == 'POST':
@@ -279,7 +279,7 @@ def message(request):  # Ensure Message model is imported
 
 def get_current_portfolio_value(portfolio):
     # Start with cash balance.
-    total = portfolio.cash_balance
+    total = Decimal(portfolio.user.profile.balance)
     # Add value of each holding using the stock's last_price (if available).
     for holding in portfolio.holdings.all():
         if holding.stock.last_price:
@@ -288,55 +288,55 @@ def get_current_portfolio_value(portfolio):
 
 @login_required
 def portfolio_view(request):
-    portfolio, created = Portfolio.objects.get_or_create(user=request.user)
+    portfolio, _ = Portfolio.objects.get_or_create(user=request.user)
     holdings = portfolio.holdings.all()
-    cash = float(portfolio.cash_balance)
-    
+    user_balance = request.user.profile.balance  # The actual decrypted float/Decimal
     total_holdings_value = 0
     holding_data = []
+
     for holding in holdings:
-        if holding.stock.last_price:
-            value = float(holding.shares) * float(holding.stock.last_price)
-        else:
-            value = 0
+        price = holding.stock.last_price or 0
+        value = float(holding.shares) * float(price)
         total_holdings_value += value
         holding_data.append({
             'holding': holding,
             'value': value,
-            'percentage': 0,  # We'll update it after calculating total portfolio value.
+            'percentage': 0,
         })
-    
-    total_portfolio_value = cash + total_holdings_value
-    cash_percentage = (cash / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
-    
-    # Update each holding's percentage.
-    for item in holding_data:
-        item['percentage'] = (item['value'] / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
 
-    # Build chart data for the pie chart.
-    chart_data = []
-    chart_data.append({
+    total_portfolio_value = float(user_balance) + total_holdings_value
+    cash_percentage = (float(user_balance) / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+
+    # Build chart data
+    chart_data = [{
         "label": "Cash",
-        "value": cash,
+        "value": float(user_balance),
         "percentage": cash_percentage
-    })
+    }]
     for item in holding_data:
+        pct = (item['value'] / total_portfolio_value * 100) if total_portfolio_value else 0
+        item['percentage'] = pct
         chart_data.append({
             "label": item['holding'].stock.ticker,
             "value": item['value'],
-            "percentage": item['percentage']
+            "percentage": pct
         })
+
+    # Also fetch all stocks for the "Trade Stocks" dropdown
     stocks = Stock.objects.all().order_by('ticker')
+
     context = {
-        'stocks': stocks,
-        'portfolio': portfolio,
+        'portfolio': portfolio,          # For your holdings logic
         'holdings': holdings,
         'holding_data': holding_data,
         'chart_data': json.dumps(chart_data),
         'total_portfolio_value': total_portfolio_value,
         'cash_percentage': cash_percentage,
+        'cash_balance': float(user_balance),  # Pass the actual float balance here
+        'stocks': stocks,
     }
     return render(request, 'portfolio.html', context)
+
 
 @login_required
 def stock_list_view(request):
@@ -413,59 +413,126 @@ def stock_list_view(request):
 def invest_view(request, ticker):
     stock = get_object_or_404(Stock, ticker=ticker)
     portfolio = get_object_or_404(Portfolio, user=request.user)
+
     if request.method == 'POST':
         form = InvestForm(request.POST)
         if form.is_valid():
             shares = form.cleaned_data['shares']
             try:
-                stock_data = yf.Ticker(stock.ticker)
-                price = stock_data.history(period="1d")['Close'].iloc[-1]
-            except Exception as e:
+                price = yf.Ticker(stock.ticker).history(period="1d")['Close'].iloc[-1]
+            except Exception:
                 messages.error(request, "Failed to retrieve stock price.")
                 return redirect('stock_list')
+
             total_cost = shares * Decimal(str(price))
-            if portfolio.cash_balance < total_cost:
+
+            # *** Use the user’s Profile’s encrypted balance ***
+            profile = request.user.profile
+            if profile.balance < total_cost:
                 messages.error(request, "Insufficient funds.")
                 return redirect('invest', ticker=ticker)
-            portfolio.cash_balance -= total_cost
-            portfolio.save()
-            holding, created = Holding.objects.get_or_create(portfolio=portfolio, stock=stock)
+
+            # Subtract funds from the encrypted balance
+            profile.balance = profile.balance - total_cost
+            profile.save()
+
+            # Update (or create) the user's Holding
+            holding, _ = Holding.objects.get_or_create(portfolio=portfolio, stock=stock)
             holding.shares += shares
             holding.save()
+
+            # Prepare the encrypted fields
+            from .models import PQServerKey
+            key_obj = PQServerKey.objects.filter(is_active=True).first()
+
+            timestamp = int(time.time())
+            encrypted_stock = encrypt_field(stock.ticker, b'investment_stock', b'investment stock encryption')
+            encrypted_type = encrypt_field('BUY', b'investment_type', b'investment type encryption')
+            encrypted_shares = encrypt_field(str(shares), b'investment_shares', b'investment shares encryption')
+            encrypted_price = encrypt_field(str(price), b'investment_price', b'investment price encryption')
+            encrypted_ts = encrypt_field(str(timestamp), b'investment_timestamp', b'investment timestamp encryption')
+
+            # Store the transaction referencing the exact key used
             InvestmentTransaction.objects.create(
                 portfolio=portfolio,
-                stock=stock,
-                transaction_type='BUY',
-                shares=shares,
-                price=price
+                encrypted_stock=encrypted_stock,
+                encrypted_transaction_type=encrypted_type,
+                encrypted_shares=encrypted_shares,
+                encrypted_price=encrypted_price,
+                encrypted_timestamp=encrypted_ts,
+                key_used=key_obj,  # new
             )
-            AuditLog.objects.create(
-                event=f"User {request.user.username} bought {shares} shares of {stock.ticker} at £{price:.2f}.",
-                user=request.user
-            )
-            messages.success(request, f"Purchased {shares} shares of {stock.ticker} at £{price:.2f} per share.")
+
+            messages.success(request, f"Purchased {shares} shares of {stock.ticker} at £{price:.2f}.")
             return redirect('portfolio')
     else:
         form = InvestForm()
+
     return render(request, 'invest.html', {'stock': stock, 'form': form})
+
 
 @login_required
 def admin_dashboard_view(request):
     if request.user.profile.role != 'admin':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
+
     users = User.objects.all().order_by('username')
-    total_users = users.count()
-    algorithm, server_pub, server_priv = get_server_keys()
-    server_public_key = base64.b64encode(server_pub).decode('utf-8')
     transactions = InvestmentTransaction.objects.all().order_by('-timestamp')
+    audit_logs = AuditLog.objects.all().order_by('-timestamp')[:5]
+    # Active server key for fallback
+    algorithm, active_pub_key, active_server_priv = get_server_keys()
+    server_public_key = base64.b64encode(active_pub_key).decode('utf-8')
+    decrypted_transactions = []
+    total_money = Decimal('0')
+    valid_count = 0
+
+    for tx in transactions[:5]:
+        try:
+            # Use the correct key:
+            if tx.key_used:
+                local_priv = base64.b64decode(tx.key_used.private_key)
+            else:
+                # fallback to the currently active key
+                local_priv = active_server_priv
+
+            # Now decrypt each field with that private key
+            decrypted_stock = decrypt_field(tx.encrypted_stock, b'investment_stock', b'investment stock encryption', local_priv)
+            decrypted_type = decrypt_field(tx.encrypted_transaction_type, b'investment_type', b'investment type encryption', local_priv)
+            shares_str = decrypt_field(tx.encrypted_shares, b'investment_shares', b'investment shares encryption', local_priv)
+            price_str = decrypt_field(tx.encrypted_price, b'investment_price', b'investment price encryption', local_priv)
+
+            shares = Decimal(shares_str)
+            price = Decimal(price_str)
+            total_money += shares * price
+            valid_count += 1
+
+            tx_display = {
+                'id': tx.id,
+                'stock': decrypted_stock,
+                'transaction_type': decrypted_type,
+                'shares': shares,
+                'price': price,
+                'timestamp': tx.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            }
+        except Exception as e:
+            # If decryption fails, show placeholders
+            tx_display = {
+                'id': tx.id,
+                'stock': "Error",
+                'transaction_type': "Error",
+                'shares': "Error",
+                'price': "Error",
+                'timestamp': tx.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            }
+        decrypted_transactions.append(tx_display)
+
     total_transactions = transactions.count()
-    total_money = sum(tx.shares * tx.price for tx in transactions) if total_transactions > 0 else 0
-    average_transaction = total_money / total_transactions if total_transactions > 0 else 0
-    audit_logs = AuditLog.objects.all().order_by('-timestamp')[:10]
+    average_transaction = total_money / valid_count if valid_count else Decimal('0')
     context = {
         'users': users,
-        'total_users': total_users,
+        'audit_logs': audit_logs,
+        'recent_transactions': decrypted_transactions,
         'server_algorithm': algorithm,
         'server_public_key': server_public_key,
         'analytics': {
@@ -473,10 +540,11 @@ def admin_dashboard_view(request):
             'total_money_moved': total_money,
             'average_transaction': average_transaction,
         },
-        'recent_transactions': transactions[:5],
-        'audit_logs': audit_logs,
     }
     return render(request, 'admin_dashboard.html', context)
+
+
+
 
 @login_required
 def admin_user_detail_view(request, user_id):
@@ -490,8 +558,10 @@ def admin_user_detail_view(request, user_id):
     # Get (or create) the portfolio for the user
     portfolio, created = Portfolio.objects.get_or_create(user=user_obj)
     holdings = portfolio.holdings.all()
-    cash = float(portfolio.cash_balance)
+
     
+    cash = float(profile.balance)
+
     total_holdings_value = 0
     holding_data = []
     for holding in holdings:
@@ -503,16 +573,17 @@ def admin_user_detail_view(request, user_id):
         holding_data.append({
             'holding': holding,
             'value': value,
-            'percentage': 0,  # to be updated below
+            'percentage': 0,
         })
     
     total_portfolio_value = cash + total_holdings_value
     cash_percentage = (cash / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
     
+    # Update each holding's percentage
     for item in holding_data:
-        item['percentage'] = (item['value'] / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
+        item['percentage'] = ((item['value'] / total_portfolio_value) * 100) if total_portfolio_value > 0 else 0
     
-    # Build chart data for the pie chart.
+    # Build chart data for the pie chart
     chart_data = [{
         "label": "Cash",
         "value": cash,
@@ -525,14 +596,16 @@ def admin_user_detail_view(request, user_id):
             "percentage": item['percentage']
         })
     
-    # Additional information based on user role.
+    # Additional information based on user role
     extra_info = {}
     if profile.role == 'client':
-        # For clients, include their advisor (this may be None).
+        # For clients, include their advisor (may be None).
         extra_info['advisor'] = profile.advisor
     elif profile.role == 'advisor':
-        # For advisors, include the list of clients assigned to them.
-        extra_info['clients_assigned'] = Profile.objects.filter(role='client', advisor=user_obj).order_by('user__username')
+        # For advisors, include the list of clients they manage.
+        extra_info['clients_assigned'] = Profile.objects.filter(
+            role='client', advisor=user_obj
+        ).order_by('user__username')
     
     context = {
         'user_obj': user_obj,
@@ -542,6 +615,7 @@ def admin_user_detail_view(request, user_id):
         'total_portfolio_value': total_portfolio_value,
         'cash_percentage': cash_percentage,
         'profile_role': profile.role,
+        'cash': cash,
     }
     context.update(extra_info)
     return render(request, 'admin_user_detail.html', context)
@@ -567,14 +641,20 @@ def admin_create_user_view(request):
     if request.user.profile.role != 'admin':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
+
     if request.method == 'POST':
         form = RegistrationForm(request.POST)
         if form.is_valid():
             user = form.save(commit=False)
             user.set_password(form.cleaned_data['password1'])
-            user.save()
+            user.save()  # This triggers the signal, which will create the Profile & Portfolio
+
+            # (Optional) set custom role & advisor from the form
             user.profile.role = form.cleaned_data.get('role')
+            if user.profile.role == 'client':
+                user.profile.advisor = form.cleaned_data.get('advisor')
             user.profile.save()
+
             AuditLog.objects.create(
                 event=f"Admin {request.user.username} created user {user.username}.",
                 user=request.user
@@ -591,6 +671,8 @@ def admin_create_user_view(request):
     else:
         form = RegistrationForm()
     return render(request, 'admin_create_user.html', {'form': form})
+
+
 
 @login_required
 def clear_db_view(request):
@@ -624,14 +706,13 @@ def advisor_view(request):
     clients_data = []
     # Initialize aggregated values.
     total_cash = 0.0
-    # Dictionary to aggregate stock holdings by ticker.
-    # Format: { ticker: {'shares': total_shares, 'price': last_price, 'company_name': company_name} }
     stock_totals = {}
     
     # Loop through each client portfolio.
     for client in client_profiles:
         portfolio, _ = Portfolio.objects.get_or_create(user=client.user)
-        cash = float(portfolio.cash_balance)
+        cash = float(portfolio.user.profile.balance)
+
         total_holdings_value = 0.0
         
         # Compute total holdings value for this client's portfolio.
@@ -701,17 +782,18 @@ def advisor_transaction_view(request):
 
     if request.method == 'POST':
         client_id = request.POST.get("client")
-        ticker = request.POST.get("ticker").strip().upper()
+        ticker = request.POST.get("ticker", "").strip().upper()
         shares_input = request.POST.get("shares")
         action = request.POST.get("action")  # "buy" or "sell"
-        
+
+        # Validate shares input
         try:
             shares = Decimal(shares_input)
         except Exception:
             messages.error(request, "Invalid share amount.")
-            return redirect('advisor')  # redirect to advisor page
+            return redirect('advisor')
 
-        # Retrieve the client profile with advisor restriction.
+        # Fetch client profile that belongs to this advisor
         try:
             client_profile = Profile.objects.get(id=client_id, role='client', advisor=request.user)
             client_user = client_profile.user
@@ -719,39 +801,50 @@ def advisor_transaction_view(request):
             messages.error(request, "Client not found or is not assigned to you.")
             return redirect('advisor')
 
-        # Get (or create) the client's portfolio.
+        # Get the client's portfolio
         portfolio, _ = Portfolio.objects.get_or_create(user=client_user)
 
-        # Retrieve the stock instance.
+        # Retrieve the stock instance
         try:
             stock = Stock.objects.get(ticker=ticker)
         except Stock.DoesNotExist:
-            messages.error(request, "Stock not found.")
+            messages.error(request, f"Stock '{ticker}' not found.")
             return redirect('advisor')
 
-        # Retrieve current stock price using yfinance.
+        # Retrieve the current stock price using yfinance
         try:
             yf_ticker = yf.Ticker(stock.ticker)
             history = yf_ticker.history(period="1d")
             if not history.empty:
                 price = Decimal(str(history['Close'].iloc[-1]))
             else:
-                messages.error(request, "Stock price not available.")
+                messages.error(request, f"Stock price not available for {ticker}.")
                 return redirect('advisor')
         except Exception:
             messages.error(request, "Error retrieving stock data.")
             return redirect('advisor')
 
+        # Retrieve the active encryption key
+        key_obj = PQServerKey.objects.filter(is_active=True).first()
+        if not key_obj:
+            messages.error(request, "No active encryption key found. Cannot record transaction.")
+            return redirect('advisor')
+
+        # Common fields for encryption
+        timestamp_str = str(int(time.time()))
+
         if action == 'buy':
             total_cost = shares * price
-            if portfolio.cash_balance < total_cost:
+            # Ensure the client has enough balance
+            if client_profile.balance < total_cost:
                 messages.error(request, "Client has insufficient funds for this purchase.")
                 return redirect('advisor')
 
-            # Deduct cash and update holdings.
-            portfolio.cash_balance -= total_cost
-            portfolio.save()
+            # Deduct the cost from the client's encrypted balance
+            client_profile.balance = client_profile.balance - total_cost
+            client_profile.save()
 
+            # Update or create the holding
             holding, created = Holding.objects.get_or_create(
                 portfolio=portfolio,
                 stock=stock,
@@ -760,16 +853,30 @@ def advisor_transaction_view(request):
             holding.shares += shares
             holding.save()
 
+            # Encrypt transaction details
+            e_stock = encrypt_field(stock.ticker, b'investment_stock', b'investment stock encryption')
+            e_type = encrypt_field('BUY', b'investment_type', b'investment type encryption')
+            e_shares = encrypt_field(str(shares), b'investment_shares', b'investment shares encryption')
+            e_price = encrypt_field(str(price), b'investment_price', b'investment price encryption')
+            e_ts = encrypt_field(timestamp_str, b'investment_timestamp', b'investment timestamp encryption')
+
+            # Create the investment transaction record
             InvestmentTransaction.objects.create(
                 portfolio=portfolio,
-                stock=stock,
-                transaction_type='BUY',
-                shares=shares,
-                price=price
+                encrypted_stock=e_stock,
+                encrypted_transaction_type=e_type,
+                encrypted_shares=e_shares,
+                encrypted_price=e_price,
+                encrypted_timestamp=e_ts,
+                key_used=key_obj,
             )
 
+            # Log the event
             AuditLog.objects.create(
-                event=f"Advisor {request.user.username} bought {shares} shares of {ticker} at £{price:.2f} for client {client_user.username}.",
+                event=(
+                    f"Advisor {request.user.username} bought {shares} shares of {ticker} "
+                    f"at £{price:.2f} for client {client_user.username}."
+                ),
                 user=request.user
             )
 
@@ -779,37 +886,53 @@ def advisor_transaction_view(request):
             )
 
         elif action == 'sell':
+            # Ensure the client actually holds that stock
             holding = Holding.objects.filter(portfolio=portfolio, stock=stock).first()
             if not holding:
                 messages.error(request, "Client does not hold this stock.")
                 return redirect('advisor')
-
             if holding.shares < shares:
                 messages.error(request, "Client does not have enough shares to sell.")
                 return redirect('advisor')
 
+            # Calculate total sale proceeds
             total_sale = shares * price
 
-            # Increase cash balance and update holdings.
-            portfolio.cash_balance += total_sale
-            portfolio.save()
+            # Increase the client's encrypted balance
+            client_profile.balance = client_profile.balance + total_sale
+            client_profile.save()
 
+            # Deduct shares
             holding.shares -= shares
             if holding.shares == 0:
                 holding.delete()
             else:
                 holding.save()
 
+            # Encrypt transaction details
+            e_stock = encrypt_field(stock.ticker, b'investment_stock', b'investment stock encryption')
+            e_type = encrypt_field('SELL', b'investment_type', b'investment type encryption')
+            e_shares = encrypt_field(str(shares), b'investment_shares', b'investment shares encryption')
+            e_price = encrypt_field(str(price), b'investment_price', b'investment price encryption')
+            e_ts = encrypt_field(timestamp_str, b'investment_timestamp', b'investment timestamp encryption')
+
+            # Create the transaction record
             InvestmentTransaction.objects.create(
                 portfolio=portfolio,
-                stock=stock,
-                transaction_type='SELL',
-                shares=shares,
-                price=price
+                encrypted_stock=e_stock,
+                encrypted_transaction_type=e_type,
+                encrypted_shares=e_shares,
+                encrypted_price=e_price,
+                encrypted_timestamp=e_ts,
+                key_used=key_obj,
             )
 
+            # Log the event
             AuditLog.objects.create(
-                event=f"Advisor {request.user.username} sold {shares} shares of {ticker} at £{price:.2f} for client {client_user.username}.",
+                event=(
+                    f"Advisor {request.user.username} sold {shares} shares of {ticker} "
+                    f"at £{price:.2f} for client {client_user.username}."
+                ),
                 user=request.user
             )
 
@@ -821,11 +944,11 @@ def advisor_transaction_view(request):
         else:
             messages.error(request, "Invalid transaction action.")
 
-        # Redirect back to the advisor page after processing the transaction.
+        # Redirect back to the advisor page
         return redirect('advisor')
 
     else:
-        # GET request: render the transaction form.
+        # GET request: Show the transaction form with clients & stocks
         clients = Profile.objects.filter(role='client', advisor=request.user).order_by('user__username')
         stocks = Stock.objects.all().order_by('ticker')
         context = {
@@ -849,7 +972,7 @@ def advisor_client_detail_view(request, client_id):
     holdings = portfolio.holdings.all()
 
     # Cash value
-    cash = float(portfolio.cash_balance)
+    cash = float(portfolio.user.profile.balance)
     
     # Initialize variables for total holding value
     total_holdings_value = 0.0
@@ -947,107 +1070,111 @@ def advisor_message_view(request):
 
 @login_required
 def client_transaction_view(request):
-    # Ensures only clients can access this view.
     if request.user.profile.role != 'client':
-        messages.error(request, "ERROR: ACCESS DENIED. Only clients can perform transactions.")
+        messages.error(request, "ACCESS DENIED. Clients only.")
         return redirect('portfolio')
-    
+
     portfolio, _ = Portfolio.objects.get_or_create(user=request.user)
-    
+
     if request.method == 'POST':
         ticker = request.POST.get("ticker", "").strip().upper()
         shares_input = request.POST.get("shares")
-        action = request.POST.get("action")  # Expected "buy" or "sell"
-        
+        action = request.POST.get("action")  # "buy" or "sell"
+
         try:
             shares = Decimal(shares_input)
-        except Exception:
-            messages.error(request, "ERROR: INVALID SHARE AMOUNT. Please enter a valid number.")
+        except:
+            messages.error(request, "Invalid share amount.")
             return redirect('portfolio')
-        
-        # Retrieve the stock instance.
+
         try:
             stock = Stock.objects.get(ticker=ticker)
         except Stock.DoesNotExist:
-            messages.error(request, f"ERROR: STOCK '{ticker}' NOT FOUND.")
+            messages.error(request, f"Stock '{ticker}' not found.")
             return redirect('portfolio')
-        
-        # Retrieve the current stock price using yfinance.
+
+        # Retrieve current price
         try:
-            yf_ticker = yf.Ticker(stock.ticker)
-            history = yf_ticker.history(period="1d")
-            if not history.empty:
-                price = Decimal(str(history['Close'].iloc[-1]))
-            else:
-                messages.error(request, "ERROR: STOCK PRICE NOT AVAILABLE. Please try again later.")
-                return redirect('portfolio')
-        except Exception:
-            messages.error(request, "ERROR: UNABLE TO RETRIEVE STOCK DATA. Please try again later.")
+            price = Decimal(str(yf.Ticker(stock.ticker).history(period="1d")['Close'].iloc[-1]))
+        except:
+            messages.error(request, "Unable to retrieve stock data.")
             return redirect('portfolio')
-        
+
+        profile = request.user.profile
+        timestamp = int(time.time())
+
+        from .models import PQServerKey
+        key_obj = PQServerKey.objects.filter(is_active=True).first()
+
         if action == 'buy':
             total_cost = shares * price
-            if portfolio.cash_balance < total_cost:
-                messages.error(request, "ERROR: INSUFFICIENT FUNDS. Please check your cash balance.")
+            if profile.balance < total_cost:
+                messages.error(request, "Insufficient funds.")
                 return redirect('portfolio')
-            
-            # Deduct cash and update holdings.
-            portfolio.cash_balance -= total_cost
-            portfolio.save()
-            holding, created = Holding.objects.get_or_create(
-                portfolio=portfolio, stock=stock, defaults={'shares': Decimal('0')}
-            )
+
+            # Subtract from encrypted balance
+            profile.balance = profile.balance - total_cost
+            profile.save()
+
+            # Increase holding
+            holding, _ = Holding.objects.get_or_create(portfolio=portfolio, stock=stock)
             holding.shares += shares
             holding.save()
-            
+
+            # Encrypt fields
+            e_stock = encrypt_field(stock.ticker, b'investment_stock', b'investment stock encryption')
+            e_type = encrypt_field('BUY', b'investment_type', b'investment type encryption')
+            e_shares = encrypt_field(str(shares), b'investment_shares', b'investment shares encryption')
+            e_price = encrypt_field(str(price), b'investment_price', b'investment price encryption')
+            e_ts = encrypt_field(str(timestamp), b'investment_timestamp', b'investment timestamp encryption')
+
+            # Save transaction
             InvestmentTransaction.objects.create(
                 portfolio=portfolio,
-                stock=stock,
-                transaction_type='BUY',
-                shares=shares,
-                price=price
+                encrypted_stock=e_stock,
+                encrypted_transaction_type=e_type,
+                encrypted_shares=e_shares,
+                encrypted_price=e_price,
+                encrypted_timestamp=e_ts,
+                key_used=key_obj,
             )
-            
-            messages.success(request, f"SUCCESS: Purchased {shares} shares of {ticker} at £{price:.2f} per share.")
-        
+            messages.success(request, f"Purchased {shares} shares of {ticker} at £{price:.2f}.")
+
         elif action == 'sell':
             holding = Holding.objects.filter(portfolio=portfolio, stock=stock).first()
-            if not holding:
-                messages.error(request, "ERROR: YOU DO NOT HOLD THIS STOCK. PLEASE VERIFY YOUR HOLDINGS.")
+            if not holding or holding.shares < shares:
+                messages.error(request, "Not enough shares to sell.")
                 return redirect('portfolio')
-            if holding.shares < shares:
-                messages.error(request, "ERROR: NOT ENOUGH SHARES TO SELL. PLEASE CHECK YOUR HOLDINGS.")
-                return redirect('portfolio')
-            
+
             total_sale = shares * price
-            portfolio.cash_balance += total_sale
-            portfolio.save()
-            
+            # Add to the encrypted balance
+            profile.balance = profile.balance + total_sale
+            profile.save()
+
             holding.shares -= shares
-            if holding.shares == 0:
-                holding.delete()
-            else:
-                holding.save()
-            
+            holding.save()
+
+            e_stock = encrypt_field(stock.ticker, b'investment_stock', b'investment stock encryption')
+            e_type = encrypt_field('SELL', b'investment_type', b'investment type encryption')
+            e_shares = encrypt_field(str(shares), b'investment_shares', b'investment shares encryption')
+            e_price = encrypt_field(str(price), b'investment_price', b'investment price encryption')
+            e_ts = encrypt_field(str(timestamp), b'investment_timestamp', b'investment timestamp encryption')
+
             InvestmentTransaction.objects.create(
                 portfolio=portfolio,
-                stock=stock,
-                transaction_type='SELL',
-                shares=shares,
-                price=price
+                encrypted_stock=e_stock,
+                encrypted_transaction_type=e_type,
+                encrypted_shares=e_shares,
+                encrypted_price=e_price,
+                encrypted_timestamp=e_ts,
+                key_used=key_obj,
             )
-            
-            messages.success(request, f"SUCCESS: Sold {shares} shares of {ticker} at £{price:.2f} per share.")
-        
+            messages.success(request, f"Sold {shares} shares of {ticker} at £{price:.2f}.")
         else:
-            messages.error(request, "ERROR: INVALID TRANSACTION ACTION. PLEASE CHOOSE 'BUY' OR 'SELL'.")
-        
+            messages.error(request, "Invalid transaction action.")
+
         return redirect('portfolio')
-    
-    # For GET requests, render the transaction form.
+
+    # GET request
     stocks = Stock.objects.all().order_by('ticker')
-    context = {
-        'stocks': stocks,
-        'portfolio': portfolio,
-    }
-    return render(request, 'client_transaction.html', context)
+    return render(request, 'client_transaction.html', {'stocks': stocks, 'portfolio': portfolio})
