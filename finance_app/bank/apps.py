@@ -14,3 +14,4 @@ class BankConfig(AppConfig):
         except Exception as e:
             # You might log the error instead of passing
             pass
+

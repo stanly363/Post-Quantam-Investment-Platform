@@ -3,7 +3,11 @@ from django.contrib import messages
 from django.contrib.auth import login, authenticate, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
-from .models import Profile, Portfolio, Stock, Holding, InvestmentTransaction, AuditLog, PQServerKey, Transaction
+from .models import (
+    Profile, Portfolio, Stock, Holding,
+    InvestmentTransaction, AuditLog, PQServerKey, Transaction
+)
+from django.db import transaction  # Ensures atomic transactions
 
 from . import crypto_utils
 from .crypto_utils import get_server_keys, generate_new_key
@@ -168,8 +172,10 @@ def register_view(request):
         if form.is_valid():
             user = form.save()
             user.profile.role = form.cleaned_data.get('role')
+            if user.profile.role == 'client':
+                user.profile.advisor = form.cleaned_data.get('advisor')
             user.profile.save()
-            
+
             AuditLog.objects.create(
                 event=f"User {user.username} registered with role {user.profile.role}.",
                 user=user
@@ -179,16 +185,14 @@ def register_view(request):
         else:
             for field in form:
                 for error in field.errors:
-                    if field.name == 'username' and 'already exists' in error.lower():
-                        messages.error(request, "The username already exists. Please choose a different one.")
-                    else:
-                        messages.error(request, f"{field.label}: {error}")
+                    messages.error(request, f"{field.label}: {error}")
             for error in form.non_field_errors():
                 messages.error(request, error)
             return redirect('register')
     else:
         form = RegistrationForm()
     return render(request, 'register.html', {'form': form})
+
 
 def login_view(request):
     if request.method == 'POST':
@@ -481,6 +485,8 @@ def admin_user_detail_view(request, user_id):
         return redirect('portfolio')
     
     user_obj = get_object_or_404(User, id=user_id)
+    profile = user_obj.profile
+    
     # Get (or create) the portfolio for the user
     portfolio, created = Portfolio.objects.get_or_create(user=user_obj)
     holdings = portfolio.holdings.all()
@@ -497,7 +503,7 @@ def admin_user_detail_view(request, user_id):
         holding_data.append({
             'holding': holding,
             'value': value,
-            'percentage': 0,  # to be updated
+            'percentage': 0,  # to be updated below
         })
     
     total_portfolio_value = cash + total_holdings_value
@@ -507,18 +513,26 @@ def admin_user_detail_view(request, user_id):
         item['percentage'] = (item['value'] / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
     
     # Build chart data for the pie chart.
-    chart_data = []
-    chart_data.append({
+    chart_data = [{
         "label": "Cash",
         "value": cash,
         "percentage": cash_percentage
-    })
+    }]
     for item in holding_data:
         chart_data.append({
             "label": item['holding'].stock.ticker,
             "value": item['value'],
             "percentage": item['percentage']
         })
+    
+    # Additional information based on user role.
+    extra_info = {}
+    if profile.role == 'client':
+        # For clients, include their advisor (this may be None).
+        extra_info['advisor'] = profile.advisor
+    elif profile.role == 'advisor':
+        # For advisors, include the list of clients assigned to them.
+        extra_info['clients_assigned'] = Profile.objects.filter(role='client', advisor=user_obj).order_by('user__username')
     
     context = {
         'user_obj': user_obj,
@@ -527,7 +541,9 @@ def admin_user_detail_view(request, user_id):
         'chart_data': json.dumps(chart_data),
         'total_portfolio_value': total_portfolio_value,
         'cash_percentage': cash_percentage,
+        'profile_role': profile.role,
     }
+    context.update(extra_info)
     return render(request, 'admin_user_detail.html', context)
 
 @login_required
@@ -595,12 +611,14 @@ def clear_db_view(request):
 @login_required
 def advisor_view(request):
     # Only allow advisors.
+    stocks = Stock.objects.all().order_by('ticker')
     if request.user.profile.role != 'advisor':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
     
     # Get all client profiles with role 'client'
-    client_profiles = Profile.objects.filter(role='client').order_by('user__username')
+    client_profiles = Profile.objects.filter(role='client', advisor=request.user).order_by('user__username')
+
     
     # Prepare a list for per-client data
     clients_data = []
@@ -669,7 +687,7 @@ def advisor_view(request):
 
     context = {
         'clients': clients_data,  # Now each client dict contains a 'portfolio_value' field.
-        'stocks': Stock.objects.all().order_by('ticker'),
+        'stocks': stocks,
         'chart_data': json.dumps(chart_data),
     }
     return render(request, 'advisor.html', context)
@@ -680,7 +698,7 @@ def advisor_transaction_view(request):
     if request.user.profile.role != 'advisor':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
-    
+
     if request.method == 'POST':
         client_id = request.POST.get("client")
         ticker = request.POST.get("ticker").strip().upper()
@@ -691,25 +709,26 @@ def advisor_transaction_view(request):
             shares = Decimal(shares_input)
         except Exception:
             messages.error(request, "Invalid share amount.")
-            return redirect('advisor_transaction')
-        
-        # Retrieve the client by id.
+            return redirect('advisor')  # redirect to advisor page
+
+        # Retrieve the client profile with advisor restriction.
         try:
-            client_user = User.objects.get(id=client_id)
-        except User.DoesNotExist:
-            messages.error(request, "Client not found.")
-            return redirect('advisor_transaction')
-        
+            client_profile = Profile.objects.get(id=client_id, role='client', advisor=request.user)
+            client_user = client_profile.user
+        except Profile.DoesNotExist:
+            messages.error(request, "Client not found or is not assigned to you.")
+            return redirect('advisor')
+
         # Get (or create) the client's portfolio.
         portfolio, _ = Portfolio.objects.get_or_create(user=client_user)
-        
+
         # Retrieve the stock instance.
         try:
             stock = Stock.objects.get(ticker=ticker)
         except Stock.DoesNotExist:
             messages.error(request, "Stock not found.")
-            return redirect('advisor_transaction')
-        
+            return redirect('advisor')
+
         # Retrieve current stock price using yfinance.
         try:
             yf_ticker = yf.Ticker(stock.ticker)
@@ -718,29 +737,29 @@ def advisor_transaction_view(request):
                 price = Decimal(str(history['Close'].iloc[-1]))
             else:
                 messages.error(request, "Stock price not available.")
-                return redirect('advisor_transaction')
+                return redirect('advisor')
         except Exception:
             messages.error(request, "Error retrieving stock data.")
-            return redirect('advisor_transaction')
-        
+            return redirect('advisor')
+
         if action == 'buy':
             total_cost = shares * price
             if portfolio.cash_balance < total_cost:
                 messages.error(request, "Client has insufficient funds for this purchase.")
-                return redirect('advisor_transaction')
-            
-            # Deduct cash from portfolio and update holdings.
+                return redirect('advisor')
+
+            # Deduct cash and update holdings.
             portfolio.cash_balance -= total_cost
             portfolio.save()
-            
+
             holding, created = Holding.objects.get_or_create(
-                portfolio=portfolio, 
-                stock=stock, 
+                portfolio=portfolio,
+                stock=stock,
                 defaults={'shares': Decimal('0')}
             )
             holding.shares += shares
             holding.save()
-            
+
             InvestmentTransaction.objects.create(
                 portfolio=portfolio,
                 stock=stock,
@@ -748,40 +767,39 @@ def advisor_transaction_view(request):
                 shares=shares,
                 price=price
             )
-            
+
             AuditLog.objects.create(
                 event=f"Advisor {request.user.username} bought {shares} shares of {ticker} at £{price:.2f} for client {client_user.username}.",
                 user=request.user
             )
-            
+
             messages.success(
                 request,
                 f"Bought {shares} shares of {ticker} for {client_user.username} at £{price:.2f} per share."
             )
-        
+
         elif action == 'sell':
             holding = Holding.objects.filter(portfolio=portfolio, stock=stock).first()
             if not holding:
                 messages.error(request, "Client does not hold this stock.")
-                return redirect('advisor_transaction')
-            
+                return redirect('advisor')
+
             if holding.shares < shares:
                 messages.error(request, "Client does not have enough shares to sell.")
-                return redirect('advisor_transaction')
-            
-            # Calculate cash from sale.
+                return redirect('advisor')
+
             total_sale = shares * price
-            
+
             # Increase cash balance and update holdings.
             portfolio.cash_balance += total_sale
             portfolio.save()
-            
+
             holding.shares -= shares
             if holding.shares == 0:
                 holding.delete()
             else:
                 holding.save()
-            
+
             InvestmentTransaction.objects.create(
                 portfolio=portfolio,
                 stock=stock,
@@ -789,32 +807,32 @@ def advisor_transaction_view(request):
                 shares=shares,
                 price=price
             )
-            
+
             AuditLog.objects.create(
                 event=f"Advisor {request.user.username} sold {shares} shares of {ticker} at £{price:.2f} for client {client_user.username}.",
                 user=request.user
             )
-            
+
             messages.success(
                 request,
                 f"Sold {shares} shares of {ticker} for {client_user.username} at £{price:.2f} per share."
             )
-        
+
         else:
             messages.error(request, "Invalid transaction action.")
-        
+
+        # Redirect back to the advisor page after processing the transaction.
         return redirect('advisor')
-    
+
     else:
         # GET request: render the transaction form.
-        clients = Profile.objects.filter(role='client').order_by('user__username')
+        clients = Profile.objects.filter(role='client', advisor=request.user).order_by('user__username')
         stocks = Stock.objects.all().order_by('ticker')
         context = {
             'clients': clients,
             'stocks': stocks,
         }
         return render(request, 'advisor_transaction.html', context)
-
 
 @login_required
 def advisor_client_detail_view(request, client_id):
@@ -823,17 +841,21 @@ def advisor_client_detail_view(request, client_id):
         messages.error(request, "Access denied.")
         return redirect('portfolio')
     
-    # Retrieve the client profile and ensure the role is 'client'
-    client_profile = get_object_or_404(Profile, id=client_id, role='client')
+    # Retrieve the client profile and ensure the role is 'client' AND they are assigned to this advisor
+    client_profile = get_object_or_404(Profile, id=client_id, role='client', advisor=request.user)
     
     # Get (or create) the client's portfolio
     portfolio, _ = Portfolio.objects.get_or_create(user=client_profile.user)
     holdings = portfolio.holdings.all()
+
     # Cash value
     cash = float(portfolio.cash_balance)
     
+    # Initialize variables for total holding value
     total_holdings_value = 0.0
     holding_data = []
+
+    # Calculate individual holding values and populate data for display
     for holding in holdings:
         if holding.stock.last_price:
             value = float(holding.shares) * float(holding.stock.last_price)
@@ -846,7 +868,9 @@ def advisor_client_detail_view(request, client_id):
             'percentage': 0,  # will compute next
         })
     
+    # Total Portfolio Value
     total_portfolio_value = cash + total_holdings_value
+    
     # Compute cash percentage
     cash_percentage = (cash / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
     
@@ -868,6 +892,7 @@ def advisor_client_detail_view(request, client_id):
             "percentage": item['percentage']
         })
     
+    # Context for rendering in the template
     context = {
         'client_profile': client_profile,
         'portfolio': portfolio,
@@ -877,6 +902,7 @@ def advisor_client_detail_view(request, client_id):
         'cash_percentage': cash_percentage,
     }
     return render(request, 'advisor_client_detail.html', context)
+
 
 @login_required
 def advisor_message_view(request):
@@ -921,7 +947,7 @@ def advisor_message_view(request):
 
 @login_required
 def client_transaction_view(request):
-    # Ensure that only clients can access this view.
+    # Ensures only clients can access this view.
     if request.user.profile.role != 'client':
         messages.error(request, "ERROR: ACCESS DENIED. Only clients can perform transactions.")
         return redirect('portfolio')

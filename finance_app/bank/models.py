@@ -13,8 +13,7 @@ ROLE_CHOICES = [
 class Profile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='client')
-    # For simplicity, we continue to use an encrypted balance on the Profile,
-    # but for investment operations we use a separate Portfolio.
+    advisor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='clients_assigned')
     encrypted_balance = models.TextField(default='')  
 
     def save(self, *args, **kwargs):

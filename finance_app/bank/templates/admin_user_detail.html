@@ -42,22 +42,46 @@
     <div class="col-md-6 d-flex align-items-center justify-content-center">
       <canvas id="userPortfolioPieChart" style="width:300px; height:300px;"></canvas>
     </div>
-
-    <!-- Back to Dashboard Button -->
+  </div>
+  
+  <!-- Additional Information Section -->
 <div class="row mt-4">
-  <div class="col-md-12 text-start">
-    {% if user.profile.role == 'admin' %}
-      <a href="{% url 'admin_dashboard' %}" class="btn btn-secondary">Back to Dashboard</a>
-    {% elif user.profile.role == 'advisor' %}
-      <a href="{% url 'advisor' %}" class="btn btn-secondary">Back to Dashboard</a>
-    {% else %}
-      <a href="{% url 'portfolio' %}" class="btn btn-secondary">Back to Dashboard</a>
+  <div class="col-md-6">
+    {% if profile_role == "client" %}
+      <h3>Advisor Information</h3>
+      {% if advisor %}
+        <p>Assigned Advisor: {{ advisor.username }}</p>
+      {% else %}
+        <p>No advisor assigned.</p>
+      {% endif %}
+    {% elif profile_role == "advisor" %}
+      <h3>Assigned Clients</h3>
+      {% if clients_assigned %}
+        <ul class="list-group">
+          {% for client in clients_assigned %}
+            <li class="list-group-item">{{ client.user.username }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No clients assigned.</p>
+      {% endif %}
     {% endif %}
   </div>
 </div>
-
+  
+  <!-- Back to Dashboard Button -->
+  <div class="row mt-4">
+    <div class="col-md-12 text-start">
+      {% if user.profile.role == 'admin' %}
+        <a href="{% url 'admin_dashboard' %}" class="btn btn-secondary">Back to Dashboard</a>
+      {% elif user.profile.role == 'advisor' %}
+        <a href="{% url 'advisor' %}" class="btn btn-secondary">Back to Dashboard</a>
+      {% else %}
+        <a href="{% url 'portfolio' %}" class="btn btn-secondary">Back to Dashboard</a>
+      {% endif %}
+    </div>
   </div>
-
+  
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -79,40 +103,39 @@
     'rgba(255, 99, 71, 0.7)',
     'rgba(60, 179, 113, 0.7)'
   ];
+  
   var pieChart = new Chart(ctx, {
     type: 'pie',
     data: {
-        labels: labels,
-        datasets: [{
-            data: values,
-            backgroundColor: backgroundColors.slice(0, labels.length),
-            borderColor: 'rgba(255, 255, 255, 1)',
-            borderWidth: 1
-        }]
+      labels: labels,
+      datasets: [{
+        data: values,
+        backgroundColor: backgroundColors.slice(0, labels.length),
+        borderColor: 'rgba(255, 255, 255, 1)',
+        borderWidth: 1
+      }]
     },
     options: {
-        responsive: false,
-        maintainAspectRatio: false,
-        plugins: {
-            legend: {
-                position: 'bottom'
-            },
-            tooltip: {
-              callbacks: {
-                label: function(context) {
+      responsive: false,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'bottom'
+        },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
               let label = context.label || '';
               if (label) {
-                  label += ': ';
+                label += ': ';
               }
-            // Format the value to two decimal places
               label += '£' + Number(context.parsed).toFixed(2);
-                    return label;
-    }
-  }
-}
+              return label;
+            }
+          }
         }
+      }
     }
-});
-
+  });
 </script>
 {% endblock %}
