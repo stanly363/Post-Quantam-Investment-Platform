@@ -20,6 +20,7 @@ from django.http import JsonResponse
 from .models import PortfolioHistory
 from django.db.models import Q
 from .models import Message
+from django.db.models import Sum
 from .forms import UserUpdateForm
 from .crypto_utils import encrypt_field,decrypt_field
 @login_required
@@ -137,29 +138,48 @@ def chat_detail_view(request, username):
 
 @login_required
 def portfolio_history_view(request):
-    portfolio = get_object_or_404(Portfolio, user=request.user)
-    current_value = get_current_portfolio_value(portfolio)
     now = timezone.now()
-    # Truncate current time to the minute.
     current_minute = now.replace(second=0, microsecond=0)
-    # Update or create a history record for the current minute.
-    history_record, created = PortfolioHistory.objects.update_or_create(
-        portfolio=portfolio,
-        timestamp=current_minute,
-        defaults={'total_value': current_value}
-    )
-    # Get all history entries for today.
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    history_entries = PortfolioHistory.objects.filter(
-        portfolio=portfolio,
-        timestamp__gte=today_start
-    ).order_by('timestamp')
-    data = [{
-        'timestamp': entry.timestamp.strftime("%H:%M"),
-        'total_value': float(entry.total_value)
-    } for entry in history_entries]
-    # Also return the starting value (first record) for depreciation calculations.
-    starting_value = data[0]['total_value'] if data else float(current_value)
+    if request.user.profile.role == 'advisor':
+        client_profiles = Profile.objects.filter(role='client', advisor=request.user)
+        portfolios = Portfolio.objects.filter(user__in=[p.user for p in client_profiles])
+        # Update history for each client's portfolio
+        for portfolio in portfolios:
+            current_value = get_current_portfolio_value(portfolio)
+            PortfolioHistory.objects.update_or_create(
+                portfolio=portfolio,
+                timestamp=current_minute,
+                defaults={'total_value': current_value}
+            )
+        # Aggregate history entries across all client portfolios
+        history_entries = PortfolioHistory.objects.filter(
+            portfolio__in=portfolios,
+            timestamp__gte=today_start
+        ).values('timestamp').annotate(total=Sum('total_value')).order_by('timestamp')
+        data = [{
+            'timestamp': entry['timestamp'].strftime("%H:%M"),
+            'total_value': float(entry['total'])
+        } for entry in history_entries]
+        starting_value = data[0]['total_value'] if data else sum(get_current_portfolio_value(p) for p in portfolios)
+        current_value = sum(get_current_portfolio_value(p) for p in portfolios)
+    else:
+        portfolio = get_object_or_404(Portfolio, user=request.user)
+        current_value = get_current_portfolio_value(portfolio)
+        PortfolioHistory.objects.update_or_create(
+            portfolio=portfolio,
+            timestamp=current_minute,
+            defaults={'total_value': current_value}
+        )
+        history_entries = PortfolioHistory.objects.filter(
+            portfolio=portfolio,
+            timestamp__gte=today_start
+        ).order_by('timestamp')
+        data = [{
+            'timestamp': entry.timestamp.strftime("%H:%M"),
+            'total_value': float(entry.total_value)
+        } for entry in history_entries]
+        starting_value = data[0]['total_value'] if data else current_value
     return JsonResponse({
         'history': data,
         'starting_value': starting_value,
@@ -290,7 +310,7 @@ def get_current_portfolio_value(portfolio):
 def portfolio_view(request):
     portfolio, _ = Portfolio.objects.get_or_create(user=request.user)
     holdings = portfolio.holdings.all()
-    user_balance = request.user.profile.balance  # The actual decrypted float/Decimal
+    user_balance = request.user.profile.balance  
     total_holdings_value = 0
     holding_data = []
 
@@ -326,13 +346,13 @@ def portfolio_view(request):
     stocks = Stock.objects.all().order_by('ticker')
 
     context = {
-        'portfolio': portfolio,          # For your holdings logic
+        'portfolio': portfolio,          #
         'holdings': holdings,
         'holding_data': holding_data,
         'chart_data': json.dumps(chart_data),
         'total_portfolio_value': total_portfolio_value,
         'cash_percentage': cash_percentage,
-        'cash_balance': float(user_balance),  # Pass the actual float balance here
+        'cash_balance': float(user_balance), 
         'stocks': stocks,
     }
     return render(request, 'portfolio.html', context)
@@ -340,18 +360,12 @@ def portfolio_view(request):
 
 @login_required
 def stock_list_view(request):
-    # Define a list of 20 common stock tickers
     default_tickers = [
-        "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA",
-        "BRK-B", "JNJ", "V", "WMT", "JPM",
-        "PG", "MA", "NVDA", "HD", "DIS",
-        "BAC", "XOM", "VZ", "ADBE", "NFLX"
+        "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA","BRK-B", "JNJ", "V", "WMT", "JPM",
+        "PG", "MA", "NVDA", "HD", "DIS", "BAC", "XOM", "VZ", "ADBE", "NFLX"
     ]
-    
-    # Check if we have at least 20 stocks
     current_count = Stock.objects.count()
     if current_count < 20:
-        # For each ticker in our list, ensure it exists in the database
         for ticker in default_tickers:
             try:
                 yf_ticker = yf.Ticker(ticker)
@@ -372,10 +386,7 @@ def stock_list_view(request):
                     }
                 )
             except Exception as e:
-                # Optionally log the error and continue
                 print(f"Error updating {ticker}: {e}")
-    
-    # Now update prices if older than 60 seconds
     stocks = Stock.objects.all().order_by('ticker')
     stock_data = []
     for stock in stocks:
@@ -400,13 +411,11 @@ def stock_list_view(request):
                 last_price = stock.last_price
         else:
             last_price = stock.last_price
-
         stock_data.append({
             'ticker': stock.ticker,
             'company_name': stock.company_name,
             'last_price': last_price,
         })
-    
     return render(request, 'stock_list.html', {'stocks': stock_data})
 
 @login_required
@@ -476,9 +485,7 @@ def admin_dashboard_view(request):
     if request.user.profile.role != 'admin':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
-
     users = User.objects.all().order_by('username')
-    transactions = InvestmentTransaction.objects.all().order_by('-timestamp')
     audit_logs = AuditLog.objects.all().order_by('-timestamp')[:5]
     # Active server key for fallback
     algorithm, active_pub_key, active_server_priv = get_server_keys()
@@ -486,27 +493,26 @@ def admin_dashboard_view(request):
     decrypted_transactions = []
     total_money = Decimal('0')
     valid_count = 0
-
+    transactions = InvestmentTransaction.objects.all().order_by('-timestamp')
     for tx in transactions[:5]:
         try:
-            # Use the correct key:
+            # Use the correct key
             if tx.key_used:
                 local_priv = base64.b64decode(tx.key_used.private_key)
             else:
-                # fallback to the currently active key
                 local_priv = active_server_priv
-
-            # Now decrypt each field with that private key
-            decrypted_stock = decrypt_field(tx.encrypted_stock, b'investment_stock', b'investment stock encryption', local_priv)
-            decrypted_type = decrypt_field(tx.encrypted_transaction_type, b'investment_type', b'investment type encryption', local_priv)
-            shares_str = decrypt_field(tx.encrypted_shares, b'investment_shares', b'investment shares encryption', local_priv)
-            price_str = decrypt_field(tx.encrypted_price, b'investment_price', b'investment price encryption', local_priv)
-
+            decrypted_stock = decrypt_field(tx.encrypted_stock, b'investment_stock',
+                                             b'investment stock encryption', local_priv)
+            decrypted_type = decrypt_field(tx.encrypted_transaction_type, b'investment_type',
+                                            b'investment type encryption', local_priv)
+            shares_str = decrypt_field(tx.encrypted_shares, b'investment_shares',
+                                        b'investment shares encryption', local_priv)
+            price_str = decrypt_field(tx.encrypted_price, b'investment_price',
+                                       b'investment price encryption', local_priv)
             shares = Decimal(shares_str)
             price = Decimal(price_str)
             total_money += shares * price
             valid_count += 1
-
             tx_display = {
                 'id': tx.id,
                 'stock': decrypted_stock,
@@ -526,7 +532,6 @@ def admin_dashboard_view(request):
                 'timestamp': tx.timestamp.strftime("%Y-%m-%d %H:%M:%S")
             }
         decrypted_transactions.append(tx_display)
-
     total_transactions = transactions.count()
     average_transaction = total_money / valid_count if valid_count else Decimal('0')
     context = {
@@ -545,23 +550,16 @@ def admin_dashboard_view(request):
 
 
 
-
 @login_required
 def admin_user_detail_view(request, user_id):
     if request.user.profile.role != 'admin':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
-    
     user_obj = get_object_or_404(User, id=user_id)
     profile = user_obj.profile
-    
-    # Get (or create) the portfolio for the user
     portfolio, created = Portfolio.objects.get_or_create(user=user_obj)
     holdings = portfolio.holdings.all()
-
-    
     cash = float(profile.balance)
-
     total_holdings_value = 0
     holding_data = []
     for holding in holdings:
@@ -575,15 +573,10 @@ def admin_user_detail_view(request, user_id):
             'value': value,
             'percentage': 0,
         })
-    
     total_portfolio_value = cash + total_holdings_value
     cash_percentage = (cash / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
-    
-    # Update each holding's percentage
     for item in holding_data:
         item['percentage'] = ((item['value'] / total_portfolio_value) * 100) if total_portfolio_value > 0 else 0
-    
-    # Build chart data for the pie chart
     chart_data = [{
         "label": "Cash",
         "value": cash,
@@ -595,11 +588,8 @@ def admin_user_detail_view(request, user_id):
             "value": item['value'],
             "percentage": item['percentage']
         })
-    
-    # Additional information based on user role
     extra_info = {}
     if profile.role == 'client':
-        # For clients, include their advisor (may be None).
         extra_info['advisor'] = profile.advisor
     elif profile.role == 'advisor':
         # For advisors, include the list of clients they manage.
@@ -649,7 +639,7 @@ def admin_create_user_view(request):
             user.set_password(form.cleaned_data['password1'])
             user.save()  # This triggers the signal, which will create the Profile & Portfolio
 
-            # (Optional) set custom role & advisor from the form
+            # set custom role & advisor from the form
             user.profile.role = form.cleaned_data.get('role')
             if user.profile.role == 'client':
                 user.profile.advisor = form.cleaned_data.get('advisor')
@@ -696,34 +686,20 @@ def advisor_view(request):
     stocks = Stock.objects.all().order_by('ticker')
     if request.user.profile.role != 'advisor':
         messages.error(request, "Access denied.")
-        return redirect('portfolio')
-    
-    # Get all client profiles with role 'client'
+        return redirect('portfolio') 
     client_profiles = Profile.objects.filter(role='client', advisor=request.user).order_by('user__username')
-
-    
-    # Prepare a list for per-client data
     clients_data = []
-    # Initialize aggregated values.
     total_cash = 0.0
     stock_totals = {}
-    
-    # Loop through each client portfolio.
     for client in client_profiles:
         portfolio, _ = Portfolio.objects.get_or_create(user=client.user)
         cash = float(portfolio.user.profile.balance)
-
         total_holdings_value = 0.0
-        
-        # Compute total holdings value for this client's portfolio.
         for holding in portfolio.holdings.all():
             price = float(holding.stock.last_price) if holding.stock.last_price else 0.0
             total_holdings_value += float(holding.shares) * price
-        
         portfolio_value = cash + total_holdings_value
         total_cash += cash
-        
-        # Aggregate holdings for chart_data.
         for holding in portfolio.holdings.all():
             ticker = holding.stock.ticker
             price = float(holding.stock.last_price) if holding.stock.last_price else 0.0
@@ -735,21 +711,14 @@ def advisor_view(request):
                     'price': price,
                     'company_name': holding.stock.company_name
                 }
-        
-        # Append individual client data.
         clients_data.append({
             'user': client.user,
             'portfolio_value': portfolio_value,
         })
-    
-    # Build chart_data for the pie chart.
-    # First add the aggregated cash value.
     chart_data = [{
         'label': "Cash",
         'value': total_cash
     }]
-    
-    # Then add each stock's total value, computed as total shares held * current price.
     for ticker, data in stock_totals.items():
         total_value = data['shares'] * data['price']
         chart_data.append({
@@ -758,14 +727,9 @@ def advisor_view(request):
             'shares': data['shares'],
             'company_name': data['company_name']
         })
-    
-    # Compute the total combined value (cash plus all stocks).
     total_combined_value = total_cash + sum(item['value'] for item in chart_data if item['label'] != "Cash")
-    
-    # Add a percentage field to each item.
     for item in chart_data:
         item['percentage'] = (item['value'] / total_combined_value * 100) if total_combined_value > 0 else 0
-
     context = {
         'clients': clients_data,  # Now each client dict contains a 'portfolio_value' field.
         'stocks': stocks,
@@ -795,7 +759,7 @@ def advisor_transaction_view(request):
 
         # Fetch client profile that belongs to this advisor
         try:
-            client_profile = Profile.objects.get(id=client_id, role='client', advisor=request.user)
+            client_profile = Profile.objects.get(user__id=client_id, role='client', advisor=request.user)
             client_user = client_profile.user
         except Profile.DoesNotExist:
             messages.error(request, "Client not found or is not assigned to you.")
@@ -963,21 +927,15 @@ def advisor_client_detail_view(request, client_id):
     if request.user.profile.role != 'advisor':
         messages.error(request, "Access denied.")
         return redirect('portfolio')
-    
-    # Retrieve the client profile and ensure the role is 'client' AND they are assigned to this advisor
-    client_profile = get_object_or_404(Profile, id=client_id, role='client', advisor=request.user)
-    
+    client_profile = get_object_or_404(Profile, user__id=client_id, role='client', advisor=request.user)
     # Get (or create) the client's portfolio
     portfolio, _ = Portfolio.objects.get_or_create(user=client_profile.user)
     holdings = portfolio.holdings.all()
-
     # Cash value
-    cash = float(portfolio.user.profile.balance)
-    
+    cash = float(portfolio.user.profile.balance)  
     # Initialize variables for total holding value
     total_holdings_value = 0.0
     holding_data = []
-
     # Calculate individual holding values and populate data for display
     for holding in holdings:
         if holding.stock.last_price:
@@ -990,13 +948,10 @@ def advisor_client_detail_view(request, client_id):
             'value': value,
             'percentage': 0,  # will compute next
         })
-    
     # Total Portfolio Value
     total_portfolio_value = cash + total_holdings_value
-    
     # Compute cash percentage
     cash_percentage = (cash / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
-    
     # Update each holding's percentage
     for item in holding_data:
         item['percentage'] = (item['value'] / total_portfolio_value * 100) if total_portfolio_value > 0 else 0
@@ -1014,8 +969,6 @@ def advisor_client_detail_view(request, client_id):
             "value": item['value'],
             "percentage": item['percentage']
         })
-    
-    # Context for rendering in the template
     context = {
         'client_profile': client_profile,
         'portfolio': portfolio,
@@ -1023,6 +976,7 @@ def advisor_client_detail_view(request, client_id):
         'chart_data': json.dumps(chart_data),
         'total_portfolio_value': total_portfolio_value,
         'cash_percentage': cash_percentage,
+        'cash_balance': cash,
     }
     return render(request, 'advisor_client_detail.html', context)
 
@@ -1048,7 +1002,7 @@ def advisor_message_view(request):
             messages.error(request, "Client not found.")
             return redirect('advisor_message')
         
-        # Encrypt the message using your crypto_utils function.
+        # Encrypt the message using crypto_utils function.
         encrypted_text = crypto_utils.encrypt_message(message_text)
         Message.objects.create(
             sender=request.user,
@@ -1073,29 +1027,24 @@ def client_transaction_view(request):
     if request.user.profile.role != 'client':
         messages.error(request, "ACCESS DENIED. Clients only.")
         return redirect('portfolio')
-
     portfolio, _ = Portfolio.objects.get_or_create(user=request.user)
-
     if request.method == 'POST':
         ticker = request.POST.get("ticker", "").strip().upper()
         shares_input = request.POST.get("shares")
         action = request.POST.get("action")  # "buy" or "sell"
-
         try:
             shares = Decimal(shares_input)
         except:
             messages.error(request, "Invalid share amount.")
             return redirect('portfolio')
-
         try:
             stock = Stock.objects.get(ticker=ticker)
         except Stock.DoesNotExist:
             messages.error(request, f"Stock '{ticker}' not found.")
             return redirect('portfolio')
-
         # Retrieve current price
         try:
-            price = Decimal(str(yf.Ticker(stock.ticker).history(period="1d")['Close'].iloc[-1]))
+            price = Decimal(str(yf.Ticker(stock.ticker).history(period="1d")['Close'].iloc[-1])) # Retrieve current price
         except:
             messages.error(request, "Unable to retrieve stock data.")
             return redirect('portfolio')

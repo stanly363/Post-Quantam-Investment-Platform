@@ -1,77 +1,47 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container my-5">
+<div class="container-fluid my-3" style="max-width: 1200px;">
   <h1>User Details for {{ user_obj.username }}</h1>
   <p>Email: {{ user_obj.email }}</p>
-  
-  <div class="row mt-4">
-    <!-- Left Column: Portfolio Info Table -->
+  <div class="row mt-3">
     <div class="col-md-6">
       <h2>Portfolio Distribution</h2>
       <p>Total Portfolio Value: £{{ total_portfolio_value|floatformat:2 }}</p>
       <table class="table table-striped">
         <thead>
-          <tr>
-            <th>Asset</th>
-            <th>Value (£)</th>
-            <th>Percentage (%)</th>
-          </tr>
+          <tr><th>Asset</th><th>Value (£)</th><th>Percentage (%)</th></tr>
         </thead>
         <tbody>
-          <tr>
-            <td>Cash</td>
-            <td>£{{ cash|floatformat:2 }}</td>
-            <td>{{ cash_percentage|floatformat:2 }}%</td>
-          </tr>
+          <tr><td>Cash</td><td>£{{ cash|floatformat:2 }}</td><td>{{ cash_percentage|floatformat:2 }}%</td></tr>
           {% for item in holding_data %}
-          <tr>
-            <td>{{ item.holding.stock.ticker }}</td>
-            <td>£{{ item.value|floatformat:2 }}</td>
-            <td>{{ item.percentage|floatformat:2 }}%</td>
-          </tr>
+          <tr><td>{{ item.holding.stock.ticker }}</td><td>£{{ item.value|floatformat:2 }}</td>
+            <td>{{ item.percentage|floatformat:2 }}%</td></tr>
           {% empty %}
-          <tr>
-            <td colspan="3">No holdings found.</td>
-          </tr>
+          <tr><td colspan="3">No holdings found.</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
-    
-    <!-- Right Column: Pie Chart -->
     <div class="col-md-6 d-flex align-items-center justify-content-center">
       <canvas id="userPortfolioPieChart" style="width:300px; height:300px;"></canvas>
     </div>
   </div>
-  
-  <!-- Additional Information Section -->
-<div class="row mt-4">
-  <div class="col-md-6">
-    {% if profile_role == "client" %}
-      <h3>Advisor Information</h3>
-      {% if advisor %}
-        <p>Assigned Advisor: {{ advisor.username }}</p>
-      {% else %}
-        <p>No advisor assigned.</p>
+  <div class="row mt-3">
+    <div class="col-md-6">
+      {% if profile_role == "client" %}
+        <h3>Advisor Information</h3>
+        {% if advisor %}<p>Assigned Advisor: {{ advisor.username }}</p>{% else %}<p>No advisor assigned.</p>{% endif %}
+      {% elif profile_role == "advisor" %}
+        <h3>Assigned Clients</h3>
+        {% if clients_assigned %}
+          <ul class="list-group">{% for client in clients_assigned %}<li class="list-group-item">
+            {{ client.user.username }}</li>{% endfor %}</ul>
+        {% else %}<p>No clients assigned.</p>{% endif %}
       {% endif %}
-    {% elif profile_role == "advisor" %}
-      <h3>Assigned Clients</h3>
-      {% if clients_assigned %}
-        <ul class="list-group">
-          {% for client in clients_assigned %}
-            <li class="list-group-item">{{ client.user.username }}</li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p>No clients assigned.</p>
-      {% endif %}
-    {% endif %}
+    </div>
   </div>
-</div>
-  
-  <!-- Back to Dashboard Button -->
-  <div class="row mt-4">
-    <div class="col-md-12 text-start">
+  <div class="row mt-3">
+    <div class="col">
       {% if user.profile.role == 'admin' %}
         <a href="{% url 'admin_dashboard' %}" class="btn btn-secondary">Back to Dashboard</a>
       {% elif user.profile.role == 'advisor' %}
@@ -81,8 +51,9 @@
       {% endif %}
     </div>
   </div>
-  
 </div>
+
+
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>

@@ -29,7 +29,7 @@
 <div class="container my-5">
   <h1 class="text-center mb-4">Advisor Dashboard</h1>
   
-  <!-- Client Portfolios Section (remains unchanged) -->
+  <!-- Client Portfolios Section -->
   <div class="mb-5">
     <h2>Client Portfolios</h2>
     {% if clients %}
@@ -59,11 +59,10 @@
   </div>
   
   
-  <!-- Operations Section (forms remain unchanged) -->
   <div class="row">
     <!-- Combined Buy/Sell Transaction Form -->
     <div class="col-md-6 d-flex justify-content-center">
-      <div class="border rounded grid-card" style="height: 500px; width: 100%;">
+      <div class="border rounded grid-card" style="width: 100%;">
         <h2 class="text-center">Buy/Sell Stocks for Client</h2>
         <form method="post" action="{% url 'advisor_transaction' %}">
           {% csrf_token %}
@@ -99,7 +98,7 @@
     
     <!-- Investment Recommendation Form -->
     <div class="col-md-6 d-flex justify-content-center">
-      <div class="border rounded grid-card" style="height: 500px; width: 100%;">
+      <div class="border rounded grid-card" style="width: 100%;">
         <h2 class="text-center">Send Investment Recommendation</h2>
         <form method="post" action="{% url 'advisor_message' %}">
           {% csrf_token %}
@@ -123,20 +122,19 @@
       </div>
     </div>
   </div>
-</div>
 
 <!-- Charts Section: Two Charts Side-by-Side -->
 <div class="row mt-5">
   <!-- Pie Chart: Portfolio Distribution -->
   <div class="col-md-6 text-center">
-    <h2 class="mb-3">Portfolio Distribution</h2>
+    <h2 class="mb-3">Client Portfolio Distribution</h2>
     <div style="display: flex; justify-content: center;">
       <canvas id="portfolioPieChart" style="width:300px; height:300px;"></canvas>
     </div>
   </div>
   <!-- Line Chart: Portfolio Value History -->
   <div class="col-md-6 text-center">
-    <h2 class="mb-3">Portfolio Value History</h2>
+    <h2 class="mb-3">Client Portfolio Value History</h2>
     <div style="display: flex; justify-content: center;">
       <canvas id="portfolioLineChart" style="width:300px; height:300px;"></canvas>
     </div>

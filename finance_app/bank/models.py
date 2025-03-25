@@ -15,10 +15,8 @@ class Profile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='client')
     advisor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='clients_assigned')
-
-
     encrypted_balance = models.TextField(default='')
-
+    
     def save(self, *args, **kwargs):
         
         if not self.encrypted_balance:
@@ -41,8 +39,6 @@ class Profile(models.Model):
 
 class Portfolio(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
-    # We no longer rely on this; you can remove or set default=0
-    # cash_balance = models.DecimalField(max_digits=12, decimal_places=2, default=10000)
     def __str__(self):
         return f"Portfolio of {self.user.username}"
 
